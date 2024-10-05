@@ -428,16 +428,23 @@ class IOPDX_OT_import_anim(Operator, ImportHelper):
         description="Start frame",
         default=1,
     )
+
+    ignore_missing_bones: BoolProperty(
+    name="Ignore missing bones",
+    description="If enabled, ignore missing bones during animation import",
+    default=False,
+    )
     # fmt:on
 
     def draw(self, context):
         box = self.layout.box()
         box.label(text="Settings:", icon="IMPORT")
         box.prop(self, "int_start")
+        box.prop(self, "ignore_missing_bones")
 
     def execute(self, context):
         try:
-            import_animfile(self.filepath, frame_start=self.int_start)
+            import_animfile(self.filepath, frame_start=self.int_start, ignore_missing_bones=self.ignore_missing_bones)
             self.report({"INFO"}, "[io_pdx_mesh] Finsihed importing {}".format(self.filepath))
             IO_PDX_SETTINGS.last_import_anim = self.filepath
 

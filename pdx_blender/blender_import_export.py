@@ -1112,49 +1112,91 @@ def create_fcurve(armature, bone_name, data_type, array_idx):
     return f_curve
 
 
-def create_anim_keys(armature, bone_name, key_dict, timestart, pose):
-    # TODO: this is very slow, create fcurves directly instead of keyframing
+def create_anim_keys(armature, bone_name, key_dict, timestart, pose, ignore_missing_bones=False):
+    # Check if the bone exists in the armature
+    if bone_name not in armature.pose.bones:
+        if ignore_missing_bones:
+            IO_PDX_LOG.warning(f"Bone '{bone_name}' not found in armature. Skipping...")
+            return
+        else:
+            raise KeyError(f"Bone '{bone_name}' not found in armature.")
+
     pose_bone = armature.pose.bones[bone_name]
 
-    # validate keyframe counts per attribute
-    duration = list(set(len(keyframes) for keyframes in key_dict.values()))
-    if len(duration) != 1:
-        raise RuntimeError("Inconsistent keyframe animation lengths across attributes. {0}".format(bone_name))
-    duration = duration[0]
+    # Validate keyframe counts per attribute
+    duration_list = list(set(len(keyframes) for keyframes in key_dict.values()))
+    if len(duration_list) != 1:
+        raise RuntimeError(f"Inconsistent keyframe animation lengths across attributes for bone '{bone_name}'.")
+    duration = duration_list[0]
 
-    # calculate start and end frames
+    # Calculate start and end frames
     timestart = int(timestart)
     timeend = timestart + duration
 
-    # build a matrix describing the transform from parent bone in the initial pose
-    pose_bone_initial = pose[bone_name]
+    # Ensure the armature has animation data
+    if armature.animation_data is None:
+        armature.animation_data_create()
+    if armature.animation_data.action is None:
+        armature.animation_data.action = bpy.data.actions.new(name=armature.name + "_action")
+    action = armature.animation_data.action
+
+    # Build a matrix describing the transform from parent bone in the initial pose
+    if bone_name in pose:
+        pose_bone_initial = pose[bone_name]
+    else:
+        if ignore_missing_bones:
+            IO_PDX_LOG.warning(f"Bone '{bone_name}' not found in initial pose. Using identity matrix.")
+            pose_bone_initial = Matrix()
+        else:
+            raise KeyError(f"Bone '{bone_name}' not found in initial pose.")
+
     parent_initial = Matrix()
     if pose_bone.parent:
-        parent_initial = pose[pose_bone.parent.name]
+        parent_name = pose_bone.parent.name
+        if parent_name in pose:
+            parent_initial = pose[parent_name]
+        else:
+            if ignore_missing_bones:
+                IO_PDX_LOG.warning(f"Parent bone '{parent_name}' not found in initial pose. Using identity matrix.")
+                parent_initial = Matrix()
+            else:
+                raise KeyError(f"Parent bone '{parent_name}' not found in initial pose.")
 
+    # Compute the transform from parent bone in the initial pose
     parent_to_pose = parent_initial.inverted_safe() @ pose_bone_initial
-    # decompose (so we can over write with animated components)
+
+    # Decompose (so we can overwrite with animated components)
     _scale = Matrix.Scale(parent_to_pose.to_scale()[0], 4)
     _rotation = parent_to_pose.to_quaternion().to_matrix().to_4x4()
     _translation = Matrix.Translation(parent_to_pose.to_translation())
 
-    # set transform per frame and insert keys on data channels
+    # Create F-curves for each attribute
+    data_paths = {
+        "s": "scale",
+        "q": "rotation_quaternion",
+        "t": "location"
+    }
+
+    fcurves = {}
+    for key, data_type in data_paths.items():
+        if key in key_dict:
+            num_channels = len(key_dict[key][0]) if isinstance(key_dict[key][0], list) else 1
+            fcurves[data_type] = []
+            for channel_idx in range(num_channels):
+                fcurve = create_fcurve(armature, bone_name, data_type, channel_idx)
+                fcurves[data_type].append(fcurve)
+
+    # Set transform per frame and insert keys on data channels
     for k, frame in enumerate(range(timestart, timeend)):
-        bpy.context.scene.frame_set(frame)
-
-        # determine if we have a parent matrix
-        parent_world = Matrix()
-        if pose_bone.parent:
-            parent_world = pose_bone.parent.matrix
-
-        # over-ride initial pose offset based on keyed attributes
+        # Override initial pose offset based on keyed attributes
         if "s" in key_dict:
             _scale = Matrix.Diagonal(key_dict["s"][k]).to_4x4()
             _scale = swap_coord_space(_scale)
 
         if "q" in key_dict:
+            q = key_dict["q"][k]
             _rotation = (
-                Quaternion((key_dict["q"][k][3], key_dict["q"][k][0], key_dict["q"][k][1], key_dict["q"][k][2]))
+                Quaternion((q[3], q[0], q[1], q[2]))
                 .to_matrix()
                 .to_4x4()
             )
@@ -1164,19 +1206,42 @@ def create_anim_keys(armature, bone_name, key_dict, timestart, pose):
             _translation = Matrix.Translation(key_dict["t"][k])
             _translation = swap_coord_space(_translation)
 
-        # recompose
+        # Recompose
         offset_matrix = _translation @ _rotation @ _scale
 
-        # apply offset matrix
+        # Apply parent transforms
+        parent_world = Matrix()
+        if pose_bone.parent:
+            parent_world = pose_bone.parent.matrix
         pose_bone.matrix = parent_world @ offset_matrix
 
-        # set keyframes on the new transform
-        if "s" in key_dict:
-            pose_bone.keyframe_insert(data_path="scale", index=-1)
-        if "q" in key_dict:
-            pose_bone.keyframe_insert(data_path="rotation_quaternion", index=-1)
+        # Extract the adjusted transforms
+        location = pose_bone.location.copy()
+        rotation_quaternion = pose_bone.rotation_quaternion.copy()
+        scale = pose_bone.scale.copy()
+
+        # Insert values into F-curves
         if "t" in key_dict:
-            pose_bone.keyframe_insert(data_path="location", index=-1)
+            for i in range(3):
+                fcurve = fcurves["location"][i]
+                fcurve.keyframe_points.add(1)
+                fcurve.keyframe_points[-1].co = (frame, location[i])
+                fcurve.keyframe_points[-1].interpolation = 'LINEAR'
+
+        if "q" in key_dict:
+            for i in range(4):
+                fcurve = fcurves["rotation_quaternion"][i]
+                fcurve.keyframe_points.add(1)
+                fcurve.keyframe_points[-1].co = (frame, rotation_quaternion[i])
+                fcurve.keyframe_points[-1].interpolation = 'LINEAR'
+
+        if "s" in key_dict:
+            for i in range(3):
+                fcurve = fcurves["scale"][i]
+                fcurve.keyframe_points.add(1)
+                fcurve.keyframe_points[-1].co = (frame, scale[i])
+                fcurve.keyframe_points[-1].interpolation = 'LINEAR'
+
 
 
 """ ====================================================================================================================
@@ -1450,7 +1515,7 @@ def export_meshfile(meshpath, exp_mesh=True, exp_skel=True, exp_locs=True, exp_s
 
 
 @allow_debug_logging
-def import_animfile(animpath, frame_start=1, **kwargs):
+def import_animfile(animpath, frame_start=1, ignore_missing_bones=False, plain_txt=False, **kwargs):
     start = time.time()
     IO_PDX_LOG.info("importing - {0}".format(animpath))
 
@@ -1496,7 +1561,7 @@ def import_animfile(animpath, frame_start=1, **kwargs):
         bone_name = clean_imported_name(bone.tag)
         try:
             pose_bone = rig.pose.bones[bone_name]
-            edit_bone = pose_bone.bone  # rig.data.bones[bone_name]
+            edit_bone = pose_bone.bone
         except KeyError:
             bone_errors.append(bone_name)
             IO_PDX_LOG.warning("failed to find bone - {0}".format(bone_name))
@@ -1526,7 +1591,7 @@ def import_animfile(animpath, frame_start=1, **kwargs):
     for bone in info:
         bone_name = clean_imported_name(bone.tag)
         pose_bone = rig.pose.bones[bone_name]
-        edit_bone = pose_bone.bone  # rig.data.bones[bone_name]
+        edit_bone = pose_bone.bone
 
         # set initial transform
         if pose_bone and edit_bone:
@@ -1563,8 +1628,8 @@ def import_animfile(animpath, frame_start=1, **kwargs):
         all_bone_keyframes[bone_name] = {sample_type: [] for sample_type in bone.attrib["sa"][0]}
 
     # then traverse the samples data to store keys per bone
-    s_idx, q_idx, t_idx = 0, 0, 0  # track offsets into samples data arrays
-    s_len, q_len, t_len = scale_length, 4, 3  # track stride across samples data arrays
+    s_idx, q_idx, t_idx = 0, 0, 0
+    s_len, q_len, t_len = scale_length, 4, 3
     for _ in range(0, framecount):
         for bone_name in all_bone_keyframes:
             bone_key_data = all_bone_keyframes[bone_name]
@@ -1583,19 +1648,31 @@ def import_animfile(animpath, frame_start=1, **kwargs):
 
     for bone_name in all_bone_keyframes:
         bone_keys = all_bone_keyframes[bone_name]
-        # check bone has keyframe values
         if bone_keys.values():
             IO_PDX_LOG.info("setting {0} keyframes on bone - {1}".format(",".join(bone_keys.keys()), bone_name))
             non_uni_keys = [i for i, data in enumerate(bone_keys.get("s", [])) if not len(set(data)) == 1]
             if any(non_uni_keys):
                 IO_PDX_LOG.debug("Bone: {0} has non-uniform scale keyframes at: {1}".format(bone_name, non_uni_keys))
-            create_anim_keys(rig, bone_name, bone_keys, frame_start, initial_pose)
+            create_anim_keys(rig, bone_name, bone_keys, frame_start, initial_pose, ignore_missing_bones)
 
     bpy.context.scene.frame_set(frame_start)
     bpy.context.view_layer.update()
 
     bpy.ops.object.select_all(action="DESELECT")
-    IO_PDX_LOG.info("import finished! ({0:.4f} sec)".format(time.time() - start))
+    elapsed_time = time.time() - start
+    IO_PDX_LOG.info("import finished! ({0:.4f} sec)".format(elapsed_time))
+
+    # Write out animation data to a plain text file for debugging
+    if plain_txt:
+        anim_txt_path = str(pathlib.Path(animpath).with_suffix(".imported.txt"))
+        with open(anim_txt_path, "wt") as txt_file:
+            txt_file.write(f"Import time: {elapsed_time:.4f} seconds\n")
+            txt_file.write("Imported Animation Data:\n\n")
+            for bone_name, bone_keys in all_bone_keyframes.items():
+                txt_file.write(f"Bone: {bone_name}\n")
+                for key_type, key_values in bone_keys.items():
+                    txt_file.write(f"  {key_type}: {key_values}\n")
+                txt_file.write("\n")
 
 
 @allow_debug_logging

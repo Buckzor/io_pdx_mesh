@@ -491,6 +491,11 @@ class IOPDX_OT_export_mesh(Operator, ExportHelper):
         description="Export meshes as blendshapes",
         default=False,
     )
+    chk_export_shapekeys_as_blendshapes: BoolProperty(
+    name="Export shapekeys as blendshapes",
+    description="Export shapekeys as blendshapes",
+    default=False,
+    )
     chk_skel: BoolProperty(
         name="Skeleton",
         description="Export related armatures",
@@ -542,6 +547,7 @@ class IOPDX_OT_export_mesh(Operator, ExportHelper):
             split = mesh_settings.split(factor=0.1)
             _, col = split.column(), split.column()
             col.prop(self, "chk_mesh_blendshape")
+            col.prop(self, "chk_export_shapekeys_as_blendshapes")
         box.prop(self, "chk_skel")
         box.prop(self, "chk_locs")
         box.prop(self, "chk_selected")
@@ -564,6 +570,7 @@ class IOPDX_OT_export_mesh(Operator, ExportHelper):
                 exp_locs=self.chk_locs,
                 exp_selected=self.chk_selected,
                 as_blendshape=self.chk_mesh_blendshape,
+                export_shapekeys_as_blendshapes=self.chk_export_shapekeys_as_blendshapes,
                 debug_mode=self.chk_debug,
                 split_verts=self.chk_split_vtx,
                 sort_verts=self.ddl_sort_vtx,

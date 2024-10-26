@@ -1337,10 +1337,11 @@ def import_meshfile(meshpath, imp_mesh=True, imp_skel=True, imp_locs=True, join_
 
 
 @allow_debug_logging
-def export_meshfile(meshpath, exp_mesh=True, exp_skel=True, exp_locs=True, exp_selected=False, **kwargs):
+def export_meshfile(meshpath, exp_mesh=True, exp_skel=True, exp_locs=True, exp_selected=False, blender_meshes=None, **kwargs):
     # kwargs wrangling
     # export mesh(es) as blendshapes
     as_blendshape = kwargs.get("as_blendshape", False)
+    export_shapekeys_as_blendshapes = kwargs.get("export_shapekeys_as_blendshapes", False)
     split_by = ["id", "p", "uv"] if as_blendshape else None
     # full vertex split option
     split_verts = kwargs.get("split_verts", False)
@@ -1361,11 +1362,11 @@ def export_meshfile(meshpath, exp_mesh=True, exp_skel=True, exp_locs=True, exp_s
 
     # populate object data
     if exp_mesh:
-        # get all meshes using at least one PDX material in the scene
-        blender_meshes = list_scene_pdx_meshes()
-        # optionally intersect with selection
-        if exp_selected:
-            blender_meshes = [obj for obj in blender_meshes if obj.select_get()]
+        if blender_meshes is None:
+            blender_meshes = list_scene_pdx_meshes()
+            # Optionally intersect with selection
+            if exp_selected:
+                blender_meshes = [obj for obj in blender_meshes if obj.select_get()]
 
         if len(blender_meshes) == 0:
             raise RuntimeError("Mesh export is selected, but found no meshes with PDX materials applied.")
@@ -1439,7 +1440,7 @@ def export_meshfile(meshpath, exp_mesh=True, exp_skel=True, exp_locs=True, exp_s
             # create parent element for skeleton data, if the mesh is skinned
             if exp_skel and bone_info_list:
                 IO_PDX_LOG.info("writing skeleton -")
-                skeletonnode_xml = Xml.SubElement(objnode_xml, "skeleton")
+                skeletonnode_xml = Xml.SubElement(object_xml, "skeleton")
 
                 # create sub-elements for each bone, populate bone attributes
                 for bone_info_dict in bone_info_list:
@@ -1448,6 +1449,88 @@ def export_meshfile(meshpath, exp_mesh=True, exp_skel=True, exp_locs=True, exp_s
                         if key in bone_info_dict and bone_info_dict[key]:
                             bonenode_xml.set(key, bone_info_dict[key])
 
+    if export_shapekeys_as_blendshapes:
+        # Rename the original object to avoid naming conflicts during shapekey export
+        for obj in blender_meshes:
+            original_obj_name = obj.name
+            original_data_name = obj.data.name
+            obj.name = original_obj_name + "_original"
+            obj.data.name = original_data_name + "_original"
+
+        # Collect all shapekey names across all meshes
+        all_shapekey_names = set()
+        for obj in blender_meshes:
+            if obj.data.shape_keys:
+                for key_block in obj.data.shape_keys.key_blocks[1:]:  # Skip the first shapekey, assumed to be the basis
+                    if not key_block.mute:
+                        all_shapekey_names.add(key_block.name)
+
+        # For each shapekey name
+        for shapekey_name in all_shapekey_names:
+            # Create a dictionary to hold temporary objects for each mesh
+            temp_objs = []
+            for obj in blender_meshes:
+                # Create a temporary duplicate object
+                temp_obj = obj.copy()
+                temp_obj.data = obj.data.copy()
+                bpy.context.collection.objects.link(temp_obj)
+
+                # Rename the temporary object to match the original object name
+                temp_obj.name = obj.name.replace("_original", "")
+                temp_obj.data.name = obj.data.name.replace("_original", "")
+
+                if temp_obj.data.shape_keys:
+                    key_blocks = temp_obj.data.shape_keys.key_blocks
+                    # Apply the shapekey if it exists; otherwise, use the first shapekey (assumed to be the basis)
+                    for kb in key_blocks:
+                        kb.value = 0.0  # Reset all shapekeys
+                    if shapekey_name in key_blocks:
+                        key_blocks[shapekey_name].value = 1.0
+                    else:
+                        key_blocks[0].value = 1.0  # Use the first shapekey if the target shapekey doesn't exist
+
+                    # Apply the shapekey to the mesh manually by modifying vertices
+                    for vert_idx, vert in enumerate(temp_obj.data.vertices):
+                        if shapekey_name in key_blocks:
+                            shape_key = key_blocks[shapekey_name]
+                            vert.co = shape_key.data[vert_idx].co
+
+                # Store the temp object for export
+                temp_objs.append(temp_obj)
+
+            # Export all temporary objects as a combined blendshape
+            temp_filepath = os.path.join(os.path.dirname(meshpath), shapekey_name + ".mesh")
+            export_meshfile(
+                temp_filepath,
+                exp_mesh=True,
+                exp_skel=False,
+                exp_locs=False,
+                exp_selected=False,
+                blender_meshes=temp_objs,
+                as_blendshape=True,
+                debug_mode=kwargs.get("debug_mode", False),
+                split_verts=kwargs.get("split_verts", False),
+                sort_verts=kwargs.get("sort_verts", "+"),
+                plain_txt=kwargs.get("plain_txt", False),
+            )
+
+            # Robust cleanup of the temporary objects and their data
+            for temp_obj in temp_objs:
+                bpy.data.meshes.remove(temp_obj.data, do_unlink=True)
+
+            # Ensure temp_objs are completely cleared before the next iteration
+            bpy.context.view_layer.update()
+
+        # Restore original object names after exporting all shapekeys
+        for obj in blender_meshes:
+            obj.name = obj.name.replace("_original", "")
+            obj.data.name = obj.data.name.replace("_original", "")
+
+
+
+
+
+ 
     if exp_skel and not exp_mesh:
         # create dummy element for node data, if exporting bones but not exporting meshes
         obj_name = "skel_frame"

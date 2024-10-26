@@ -12,6 +12,7 @@ author : ross-g
 import os
 import pathlib
 import time
+import sys
 from collections import OrderedDict, defaultdict, namedtuple
 from operator import itemgetter
 
@@ -1371,8 +1372,11 @@ def export_meshfile(meshpath, exp_mesh=True, exp_skel=True, exp_locs=True, exp_s
         if len(blender_meshes) == 0:
             raise RuntimeError("Mesh export is selected, but found no meshes with PDX materials applied.")
 
+        # Cache mesh indices to avoid recalculating them during sorting
+        mesh_indices = {obj: get_mesh_index(obj.data) for obj in blender_meshes}
+
         # sort meshes for export by index
-        blender_meshes.sort(key=lambda obj: get_mesh_index(obj.data))
+        blender_meshes.sort(key=lambda obj: mesh_indices[obj])
 
         for i, obj in enumerate(blender_meshes):
             # create parent element for node data, if exporting meshes
@@ -1454,8 +1458,8 @@ def export_meshfile(meshpath, exp_mesh=True, exp_skel=True, exp_locs=True, exp_s
         for obj in blender_meshes:
             original_obj_name = obj.name
             original_data_name = obj.data.name
-            obj.name = original_obj_name + "_original"
-            obj.data.name = original_data_name + "_original"
+            obj.name = original_obj_name + "_temp_export"
+            obj.data.name = original_data_name + "_temp_export"
 
         # Collect all shapekey names across all meshes
         all_shapekey_names = set()
@@ -1465,9 +1469,19 @@ def export_meshfile(meshpath, exp_mesh=True, exp_skel=True, exp_locs=True, exp_s
                     if not key_block.mute:
                         all_shapekey_names.add(key_block.name)
 
-        # For each shapekey name
+        # Sequentially process each shapekey
+
+        progress_total = len(all_shapekey_names)
+        progress_current = 0
+        start_time = time.time()
         for shapekey_name in all_shapekey_names:
-            # Create a dictionary to hold temporary objects for each mesh
+            # Update progress indicator
+            progress_current += 1
+            elapsed_time = time.time() - start_time
+            estimated_total_time = (elapsed_time / progress_current) * progress_total if progress_current > 0 else 0
+            sys.stdout.write(f"\rExporting shapekey {progress_current}/{progress_total} - Estimated time remaining: {estimated_total_time - elapsed_time:.2f}s")
+            sys.stdout.flush()
+
             temp_objs = []
             for obj in blender_meshes:
                 # Create a temporary duplicate object
@@ -1475,9 +1489,9 @@ def export_meshfile(meshpath, exp_mesh=True, exp_skel=True, exp_locs=True, exp_s
                 temp_obj.data = obj.data.copy()
                 bpy.context.collection.objects.link(temp_obj)
 
-                # Rename the temporary object to match the original object name
-                temp_obj.name = obj.name.replace("_original", "")
-                temp_obj.data.name = obj.data.name.replace("_original", "")
+                # Rename the temporary object to match the original object name consistently
+                temp_obj.name = obj.name[:-12]
+                temp_obj.data.name = obj.data.name[:-12]
 
                 if temp_obj.data.shape_keys:
                     key_blocks = temp_obj.data.shape_keys.key_blocks
@@ -1521,10 +1535,13 @@ def export_meshfile(meshpath, exp_mesh=True, exp_skel=True, exp_locs=True, exp_s
             # Ensure temp_objs are completely cleared before the next iteration
             bpy.context.view_layer.update()
 
+        # Newline for progress output
+        sys.stdout.write("\n")
+
         # Restore original object names after exporting all shapekeys
         for obj in blender_meshes:
-            obj.name = obj.name.replace("_original", "")
-            obj.data.name = obj.data.name.replace("_original", "")
+            obj.name = obj.name[:-12]
+            obj.data.name = obj.data.name[:-12]
 
 
 

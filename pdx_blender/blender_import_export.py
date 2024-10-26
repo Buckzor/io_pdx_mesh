@@ -1444,7 +1444,7 @@ def export_meshfile(meshpath, exp_mesh=True, exp_skel=True, exp_locs=True, exp_s
             # create parent element for skeleton data, if the mesh is skinned
             if exp_skel and bone_info_list:
                 IO_PDX_LOG.info("writing skeleton -")
-                skeletonnode_xml = Xml.SubElement(object_xml, "skeleton")
+                skeletonnode_xml = Xml.SubElement(objnode_xml, "skeleton")
 
                 # create sub-elements for each bone, populate bone attributes
                 for bone_info_dict in bone_info_list:

@@ -1146,8 +1146,9 @@ def create_anim_keys(armature, bone_name, key_dict, timestart, pose, ignore_miss
         pose_bone_initial = pose[bone_name]
     else:
         if ignore_missing_bones:
-            IO_PDX_LOG.warning(f"Bone '{bone_name}' not found in initial pose. Using identity matrix.")
-            pose_bone_initial = Matrix()
+            # USE ARMATURE'S REST POSE INSTEAD OF IDENTITY MATRIX
+            IO_PDX_LOG.warning(f"Bone '{bone_name}' not found in initial pose. Using armature's rest pose.")
+            pose_bone_initial = pose_bone.bone.matrix_local  # Critical fix
         else:
             raise KeyError(f"Bone '{bone_name}' not found in initial pose.")
 
@@ -1158,8 +1159,9 @@ def create_anim_keys(armature, bone_name, key_dict, timestart, pose, ignore_miss
             parent_initial = pose[parent_name]
         else:
             if ignore_missing_bones:
-                IO_PDX_LOG.warning(f"Parent bone '{parent_name}' not found in initial pose. Using identity matrix.")
-                parent_initial = Matrix()
+                # USE PARENT'S REST POSE INSTEAD OF IDENTITY MATRIX
+                IO_PDX_LOG.warning(f"Parent bone '{parent_name}' not found in initial pose. Using armature's rest pose.")
+                parent_initial = pose_bone.parent.bone.matrix_local  # Critical fix
             else:
                 raise KeyError(f"Parent bone '{parent_name}' not found in initial pose.")
 
@@ -1625,7 +1627,7 @@ def import_animfile(animpath, frame_start=1, ignore_missing_bones=False, plain_t
     # find animation info and samples
     info = asset_elem.find("info")
     samples = asset_elem.find("samples")
-    framecount = info.attrib["sa"][0]
+    framecount = int(info.attrib["sa"][0])  # Fixed typo from original code
 
     # set scene animation and playback settings
     fps = int(info.attrib["fps"][0])
@@ -1656,19 +1658,23 @@ def import_animfile(animpath, frame_start=1, ignore_missing_bones=False, plain_t
     IO_PDX_LOG.info("finding bones -")
     scale_length = set()
     bone_errors = []
+    available_bones = []
     for bone in info:
         scale_length.add(len(bone.attrib["s"]))
         bone_name = clean_imported_name(bone.tag)
         try:
-            pose_bone = rig.pose.bones[bone_name]
-            edit_bone = pose_bone.bone
+            _ = rig.pose.bones[bone_name]
+            available_bones.append(bone_name)
         except KeyError:
             bone_errors.append(bone_name)
             IO_PDX_LOG.warning("failed to find bone - {0}".format(bone_name))
 
     # break on missing bones
     if bone_errors:
-        raise RuntimeError("Missing bones required for animation: {0}".format(bone_errors))
+        if ignore_missing_bones:
+            IO_PDX_LOG.warning("Ignoring missing bones: {0}".format(bone_errors))
+        else:
+            raise RuntimeError("Missing bones required for animation: {0}".format(bone_errors))
 
     # break on variable size scale vectors
     if len(scale_length) != 1:
@@ -1690,6 +1696,8 @@ def import_animfile(animpath, frame_start=1, ignore_missing_bones=False, plain_t
     IO_PDX_LOG.info("setting initial pose on bones - {0}".format(len(info)))
     for bone in info:
         bone_name = clean_imported_name(bone.tag)
+        if ignore_missing_bones and bone_name not in rig.pose.bones:
+            continue
         pose_bone = rig.pose.bones[bone_name]
         edit_bone = pose_bone.bone
 
@@ -1723,15 +1731,37 @@ def import_animfile(animpath, frame_start=1, ignore_missing_bones=False, plain_t
 
     # check which transform types are animated on each bone
     all_bone_keyframes = OrderedDict()
+    valid_bones = []  # Track bones that actually exist
     for bone in info:
         bone_name = clean_imported_name(bone.tag)
+        if ignore_missing_bones and bone_name not in rig.pose.bones:
+            continue  # Skip missing bones entirely
         all_bone_keyframes[bone_name] = {sample_type: [] for sample_type in bone.attrib["sa"][0]}
+        valid_bones.append(bone_name)
 
     # then traverse the samples data to store keys per bone
     s_idx, q_idx, t_idx = 0, 0, 0
     s_len, q_len, t_len = scale_length, 4, 3
+
     for _ in range(0, framecount):
-        for bone_name in all_bone_keyframes:
+        for bone in info:
+            bone_name = clean_imported_name(bone.tag)
+            
+            # SKIP PROCESSING FOR MISSING BONES
+            if ignore_missing_bones and bone_name not in valid_bones:
+                # Advance indices past this bone's data to prevent misalignment
+                sample_types = bone.attrib["sa"][0]
+                if "s" in sample_types:
+                    s_idx += s_len
+                if "q" in sample_types:
+                    q_idx += q_len
+                if "t" in sample_types:
+                    t_idx += t_len
+                continue
+            
+            if bone_name not in all_bone_keyframes:
+                continue
+                
             bone_key_data = all_bone_keyframes[bone_name]
             if "s" in bone_key_data:
                 frame_bone_scale = samples.attrib["s"][s_idx : s_idx + s_len] * scale_padding
@@ -1747,6 +1777,8 @@ def import_animfile(animpath, frame_start=1, ignore_missing_bones=False, plain_t
                 t_idx += t_len
 
     for bone_name in all_bone_keyframes:
+        if ignore_missing_bones and bone_name not in rig.pose.bones:
+            continue
         bone_keys = all_bone_keyframes[bone_name]
         if bone_keys.values():
             IO_PDX_LOG.info("setting {0} keyframes on bone - {1}".format(",".join(bone_keys.keys()), bone_name))
